@@ -118,3 +118,38 @@ Phase 6: Observability   → Views у `supabase/migrations/` та дашборд
 ```
 
 > **Кожен `PLAN.md` файл — це точна специфікація імплементації, прив'язана до ідей з `docs/`**
+
+---
+
+## v2 Інваріанти імплементації (2026-07-01, після аудиту)
+
+Ці рішення закріплені в коді і НЕ мають бути відкочені при подальшій роботі:
+
+1. **Один селектор карток.** `_shared/orchestrator.ts` — єдиний код-шлях
+   (hard constraints + score formula) для `record-signal` І `next-card`.
+2. **Compose ніколи не працює без місій.** Якщо Reflector не дав missions,
+   їх детерміновано будує `buildComposeMissions()` зі стану ниток/ритму
+   (слоти: deepen / mutate / transfer / wildcard / callback). Це і є
+   "AI proposes, code decides".
+3. **Card lifecycle:** `queued → delivered → shown`. `delivered` = віддано
+   в буфер клієнта; `shown` + `shown_at` — тільки коли клієнт надіслав
+   `impression` (реальний показ). Ритм сесії оновлюється на impression.
+4. **Дедуп ai_runs:** unique index `(user_id, run_type) WHERE status='queued'`
+   (міграція 007). Всі постановки в чергу — через `queueAiRun()`;
+   unique violation = "вже в черзі", не помилка.
+5. **strategic_reflect — лише за лічильниками** (3 ended сесії або 5 нових
+   canon з часу останнього strategic), НЕ на кожен старт застосунку.
+6. **Structured outputs строго:** всі 4 режими ai-worker мають strict JSON
+   schemas. Схема патча нитки = whitelist — heat/fatigue/status/version
+   недоступні AI фізично (+ `sanitizePatch` у коді як друга лінія).
+7. **Novelty debt погашається** показом wildcard/transfer/probe
+   (`NOVELTY_REPAYMENT` у constants), а не тільки росте.
+8. **Pre-generation безпечна за конструкцією:** cold_start_compose зі
+   `stage='pre_onboarding'` генерує лише universally safe проби (boundaries
+   ще невідомі), а `start-session` додатково фільтрує видачу проти
+   фінальних boundaries.
+9. **Share = реальний share sheet.** Сигнал `share` пишеться лише після
+   завершеного шерингу (соціальна геометрія не має фальшивих сигналів).
+10. **Watchdog:** `requeue_stale_ai_runs()` (міграція 007) повертає завислі
+    running-джоби в чергу; повернення в `queued` автоматично ре-тригерить
+    ai-worker через pg_net.

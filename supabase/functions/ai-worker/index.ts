@@ -30,8 +30,14 @@ import {
   COMPOSE_CANDIDATE_COUNT,
   REFLECTION_CARD_WINDOW,
   CANON_EXEMPLAR_COUNT,
+  CARD_MOVES,
+  TEMPERATURE_COMPOSE,
+  TEMPERATURE_REFLECT,
+  TEMPERATURE_STRATEGIC,
+  TEMPERATURE_DISTILL,
   estimateCost,
 } from '../_shared/constants.ts';
+import { buildComposeMissions, queueAiRun } from '../_shared/orchestrator.ts';
 import type { AiRun, Thread, Card } from '../_shared/types.ts';
 
 // ─── Prompt Layers (docs/06 §Prompt Architecture) ───────────────────────────
@@ -100,6 +106,10 @@ Rules:
 ✓ Separate what worked: the NERVE, the OPERATOR, the VOICE, the FUEL, the DISTANCE
 ✓ Formulate what to test next as an open question
 ✓ Consider user's language and cultural context
+✓ QUIET USERS: if there are few or no hearts, mine the IMPLICIT signals —
+  long dwell / high read-ratio / 'back' events are attention evidence.
+  Form weak candidate threads from dwell patterns; a silent user is not
+  an empty user
 
 ✗ Do NOT make psychological diagnoses
 ✗ Do NOT turn one hit into stable truth (one heart ≠ "user loves X")
@@ -240,10 +250,233 @@ GOOD: "Відповідальний за корпоративну культур
 WHY GOOD: VOICE of a bureaucrat. Formal register. The humor is in WHO says it and HOW. The format IS the joke.`;
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strict Structured Output Schemas (docs/06: "GPT повертає тільки Structured Output")
+//
+// The thread patch schema IS the whitelist: heat/fatigue/status/version are
+// NOT in it, so the model physically cannot touch mechanics-owned fields.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const THREAD_PATCH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['core', 'mechanism', 'emotional_payoffs', 'working_voices', 'confirmed_contexts', 'contexts_to_try', 'avoid', 'open_question', 'depth'],
+  properties: {
+    core: { type: ['string', 'null'] },
+    mechanism: { type: ['string', 'null'] },
+    emotional_payoffs: { type: ['array', 'null'], items: { type: 'string' } },
+    working_voices: { type: ['array', 'null'], items: { type: 'string' } },
+    confirmed_contexts: { type: ['array', 'null'], items: { type: 'string' } },
+    contexts_to_try: { type: ['array', 'null'], items: { type: 'string' } },
+    avoid: { type: ['array', 'null'], items: { type: 'string' } },
+    open_question: { type: ['string', 'null'] },
+    depth: { type: ['integer', 'null'] },
+  },
+};
+
+const MISSION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['move', 'thread_ids', 'purpose', 'target_context', 'semantic_distance'],
+  properties: {
+    move: { type: 'string', enum: [...CARD_MOVES] },
+    thread_ids: { type: 'array', items: { type: 'string' } },
+    purpose: { type: 'string' },
+    target_context: { type: ['string', 'null'] },
+    semantic_distance: { type: ['number', 'null'] },
+  },
+};
+
+const THREAD_OPERATIONS_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['operation', 'thread_id', 'expected_version', 'confidence_delta', 'patch', 'evidence_card_ids'],
+    properties: {
+      operation: { type: 'string', enum: ['strengthen', 'weaken', 'split', 'merge', 'retire', 'create'] },
+      thread_id: { type: ['string', 'null'] },
+      expected_version: { type: ['integer', 'null'] },
+      confidence_delta: { type: ['number', 'null'] },
+      patch: THREAD_PATCH_SCHEMA,
+      evidence_card_ids: { type: 'array', items: { type: 'string' } },
+    },
+  },
+};
+
+const REFLECTOR_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['observations', 'thread_operations', 'session_adjustment', 'compose_missions'],
+  properties: {
+    observations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['claim', 'evidence_for', 'evidence_against', 'confidence', 'alternative_explanation'],
+        properties: {
+          claim: { type: 'string' },
+          evidence_for: { type: 'array', items: { type: 'string' } },
+          evidence_against: { type: 'array', items: { type: 'string' } },
+          confidence: { type: 'number' },
+          alternative_explanation: { type: 'string' },
+        },
+      },
+    },
+    thread_operations: THREAD_OPERATIONS_SCHEMA,
+    session_adjustment: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['novelty_target', 'threads_to_rest', 'avoid_next_moves', 'desired_temperature'],
+      properties: {
+        novelty_target: { type: ['number', 'null'] },
+        threads_to_rest: { type: 'array', items: { type: 'string' } },
+        avoid_next_moves: { type: 'array', items: { type: 'string' } },
+        desired_temperature: { type: ['number', 'null'] },
+      },
+    },
+    compose_missions: { type: 'array', items: MISSION_SCHEMA },
+  },
+};
+
+const RECIPE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['reality', 'charged_tension', 'transformation', 'voice', 'emotional_fuel', 'distance', 'format', 'novelty_axis', 'semantic_distance'],
+  properties: {
+    reality: { type: 'string' },
+    charged_tension: { type: 'string' },
+    transformation: { type: 'string' },
+    voice: { type: 'string' },
+    emotional_fuel: { type: 'array', items: { type: 'string' } },
+    distance: { type: 'string' },
+    format: { type: 'string' },
+    novelty_axis: { type: 'string' },
+    semantic_distance: { type: 'number' },
+  },
+};
+
+const COMPOSER_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['candidates'],
+  properties: {
+    candidates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text', 'move', 'source_thread_ids', 'recipe', 'hypothesis_tested', 'expected_learning'],
+        properties: {
+          text: { type: 'string' },
+          move: { type: 'string', enum: [...CARD_MOVES] },
+          source_thread_ids: { type: 'array', items: { type: 'string' } },
+          recipe: RECIPE_SCHEMA,
+          hypothesis_tested: { type: 'string' },
+          expected_learning: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['if_heart', 'if_stop_without_heart', 'if_fast_skip'],
+            properties: {
+              if_heart: { type: 'string' },
+              if_stop_without_heart: { type: 'string' },
+              if_fast_skip: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+const STRATEGIC_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['thread_operations', 'strategic_summary', 'known_anti_patterns', 'unexplored_frontiers', 'compose_missions'],
+  properties: {
+    thread_operations: THREAD_OPERATIONS_SCHEMA,
+    strategic_summary: { type: 'string' },
+    known_anti_patterns: { type: 'array', items: { type: 'string' } },
+    unexplored_frontiers: { type: 'array', items: { type: 'string' } },
+    compose_missions: { type: 'array', items: MISSION_SCHEMA },
+  },
+};
+
+const DISTILL_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['recipes'],
+  properties: {
+    recipes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['card_id', 'scope', 'cleaned_recipe', 'diagnostic_purpose'],
+        properties: {
+          card_id: { type: 'string' },
+          scope: { type: 'string', enum: ['reusable_exact', 'reusable_recipe', 'personal'] },
+          cleaned_recipe: { ...RECIPE_SCHEMA, type: ['object', 'null'] },
+          diagnostic_purpose: { type: ['string', 'null'] },
+        },
+      },
+    },
+  },
+};
+
+// Code-side defense in depth: even if a schema changes, mechanics-owned
+// fields can never reach the DB from an AI patch.
+const PATCH_WHITELIST = [
+  'core', 'mechanism', 'emotional_payoffs', 'working_voices',
+  'confirmed_contexts', 'contexts_to_try', 'avoid', 'open_question', 'depth',
+] as const;
+
+function sanitizePatch(patch: Record<string, unknown> | undefined | null): Record<string, unknown> {
+  const clean: Record<string, unknown> = {};
+  if (!patch) return clean;
+  for (const key of PATCH_WHITELIST) {
+    if (patch[key] != null) clean[key] = patch[key];
+  }
+  return clean;
+}
+
+// Queue a compose run carrying missions; if one is already queued (dedup
+// index), merge the missions into it instead of losing them.
+async function queueComposeMissions(
+  supabase: ReturnType<typeof createServiceClient>,
+  userId: string,
+  sessionId: string | null,
+  missions: Array<Record<string, unknown>>,
+  reason: string,
+) {
+  const result = await queueAiRun(supabase, {
+    user_id: userId,
+    session_id: sessionId,
+    run_type: 'compose',
+    trigger_reason: reason,
+    input_snapshot: { missions },
+    prompt_version: PROMPT_VERSION,
+    schema_version: SCHEMA_VERSION,
+  });
+  if (result === 'duplicate') {
+    await supabase
+      .from('ai_runs')
+      .update({ input_snapshot: { missions }, trigger_reason: reason })
+      .eq('user_id', userId)
+      .eq('run_type', 'compose')
+      .eq('status', 'queued');
+  }
+}
+
+
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
+
+  // Parsed once, visible to the catch block (req body can't be re-read)
+  let requestedRunId: string | null = null;
 
   try {
     const supabase = createServiceClient();
@@ -251,6 +484,7 @@ serve(async (req: Request) => {
     // ─── Pick up queued job ──────────────────────────────────────────────
     // Can be called with specific run_id or pick oldest queued
     const body = await req.json().catch(() => ({}));
+    requestedRunId = body.run_id || null;
     let run: AiRun | null = null;
 
     if (body.run_id) {
@@ -280,15 +514,24 @@ serve(async (req: Request) => {
       );
     }
 
-    // ─── Mark as running ────────────────────────────────────────────────
-    await supabase
+    // ─── Atomic claim: only ONE worker may take this run ────────────────
+    const { data: claimed } = await supabase
       .from('ai_runs')
       .update({
         status: 'running',
         started_at: new Date().toISOString(),
         attempts: run.attempts + 1,
       })
-      .eq('id', run.id);
+      .eq('id', run.id)
+      .eq('status', 'queued')
+      .select('id');
+
+    if (!claimed?.length) {
+      return new Response(
+        JSON.stringify({ message: 'Run already claimed by another worker' }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     // ─── Dispatch by run_type ───────────────────────────────────────────
     let result: WorkerResult;
@@ -341,15 +584,24 @@ serve(async (req: Request) => {
     const message = error instanceof Error ? error.message : 'Unknown error';
     console.error('ai-worker error:', message);
 
-    // Try to mark the run as failed
+    // Requeue for retry — the watchdog / dedup index guard against loops.
+    // Marking 'queued' re-fires the pg_net trigger (migrations 003/004).
     try {
-      const supabase = createServiceClient();
-      const body = await req.clone().json().catch(() => ({}));
-      if (body.run_id) {
+      if (requestedRunId) {
+        const supabase = createServiceClient();
+        const { data: failedRun } = await supabase
+          .from('ai_runs')
+          .select('attempts')
+          .eq('id', requestedRunId)
+          .single();
         await supabase
           .from('ai_runs')
-          .update({ status: 'failed', completed_at: new Date().toISOString() })
-          .eq('id', body.run_id);
+          .update(
+            (failedRun?.attempts ?? 3) >= 3
+              ? { status: 'failed', completed_at: new Date().toISOString() }
+              : { status: 'queued' }
+          )
+          .eq('id', requestedRunId);
       }
     } catch { /* best effort */ }
 
@@ -389,6 +641,7 @@ async function callOpenAI(
   systemPrompt: string,
   userPrompt: string,
   responseSchema?: Record<string, unknown>,
+  temperature: number = 0.8,
 ): Promise<{
   content: Record<string, unknown>;
   usage: { input_tokens: number; output_tokens: number; cached_tokens: number };
@@ -402,7 +655,7 @@ async function callOpenAI(
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
-    temperature: 0.8,
+    temperature,
   };
 
   // Use structured outputs if schema provided
@@ -598,7 +851,9 @@ Analyze what we've learned from recent reactions.
 When creating compose_missions, ensure they specify the user's language (${ctx.userMind?.language_state?.primary || 'uk'}) and respect cultural context.
 Return structured JSON.`;
 
-  const { content, usage } = await callOpenAI(model, systemPrompt, userPrompt);
+  const { content, usage } = await callOpenAI(
+    model, systemPrompt, userPrompt, REFLECTOR_SCHEMA, TEMPERATURE_REFLECT,
+  );
   const estimated = estimateCost(model, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
 
   // ─── Apply thread patches with optimistic locking ─────────────────────
@@ -611,7 +866,7 @@ Return structured JSON.`;
   for (const op of threadOps) {
     if (op.operation === 'create' && op.patch) {
       // Create new thread
-      const patch = op.patch as Record<string, unknown>;
+      const patch = sanitizePatch(op.patch as Record<string, unknown>);
       const { error } = await supabase.from('threads').insert({
         user_id: run.user_id,
         core: patch.core || 'New hypothesis',
@@ -628,9 +883,11 @@ Return structured JSON.`;
       if (!error) threadsPatched++;
 
     } else if (op.thread_id && op.expected_version != null) {
-      // Patch existing thread with optimistic locking
-      const patch = (op.patch || {}) as Record<string, unknown>;
-      const updateObj: Record<string, unknown> = { ...patch };
+      // Patch existing thread with optimistic locking.
+      // sanitizePatch = whitelist: AI can never touch heat/fatigue/status.
+      const updateObj: Record<string, unknown> = sanitizePatch(
+        op.patch as Record<string, unknown>,
+      );
 
       // Apply confidence delta if provided
       if (typeof op.confidence_delta === 'number') {
@@ -696,17 +953,16 @@ Return structured JSON.`;
   // ─── Create compose missions from reflection output ─────────────────
   const missions = (content as { compose_missions?: Array<Record<string, unknown>> }).compose_missions || [];
   if (missions.length > 0) {
-    await supabase.from('ai_runs').insert({
-      user_id: run.user_id,
-      session_id: run.session_id,
-      run_type: 'compose',
-      status: 'queued',
-      trigger_reason: 'reflection_missions',
-      input_snapshot: { missions },
-      prompt_version: PROMPT_VERSION,
-      schema_version: SCHEMA_VERSION,
-    });
+    await queueComposeMissions(
+      supabase, run.user_id, run.session_id, missions, 'reflection_missions',
+    );
   }
+
+  // Update reflection bookkeeping
+  await supabase
+    .from('user_minds')
+    .update({ last_reflection_at: new Date().toISOString() })
+    .eq('user_id', run.user_id);
 
   return {
     status: hasConflict ? 'conflict' : 'completed',
@@ -731,8 +987,29 @@ async function executeComposition(
   const model = MODEL_COMPOSE;
   const ctx = await buildUserContext(supabase, run.user_id, run.session_id);
 
-  // Get missions from input_snapshot or generate default ones
-  const missions = (run.input_snapshot as { missions?: Array<Record<string, unknown>> })?.missions || [];
+  // docs/04 §Поділ влади: the MECHANICS decide which moves the session
+  // needs. If the run carries no missions from a Reflector, the
+  // deterministic mission builder creates them from thread/rhythm state.
+  // The AI NEVER decides "what kind of move to make" on its own.
+  let missions = (run.input_snapshot as { missions?: Array<Record<string, unknown>> })?.missions || [];
+  if (missions.length === 0) {
+    missions = buildComposeMissions(
+      ctx.threads as Thread[],
+      (ctx.sessionState?.rhythm_state as never) || null,
+      ctx.userMind,
+      COMPOSE_CANDIDATE_COUNT,
+    ) as unknown as Array<Record<string, unknown>>;
+  }
+
+  // Pre-onboarding generation runs BEFORE the user sets boundaries (step 3).
+  // Boundaries are unknown → only universally safe territories are allowed.
+  const isPreOnboarding =
+    (run.input_snapshot as { stage?: string })?.stage === 'pre_onboarding';
+  const safetyBlock = isPreOnboarding
+    ? `\n⚠️ SAFETY: The user has NOT yet set content boundaries. Generate ONLY universally safe probes.
+FORBIDDEN in this batch: death/disease, sex, politics, religion, violence, profanity, cruelty, humiliation.
+Allowed nerves: everyday absurdity, tender human imperfection, social awkwardness (mild), language itself, adulthood performance, technology confusion.\n`
+    : '';
 
   // Build system prompt: layers A-D (static, cached)
   const systemPrompt = [
@@ -776,11 +1053,13 @@ Text language is ALWAYS: ${langName}
 Familiar worlds: ${JSON.stringify(familiarWorlds)}
 Boundaries: ${JSON.stringify(ctx.userMind?.boundaries || {})}
 Anti-patterns: ${JSON.stringify(ctx.userMind?.known_anti_patterns || [])}
+${safetyBlock}
+MISSIONS (one candidate per mission — the mission defines WHAT to test, you define HOW):
+${JSON.stringify(missions, null, 2)}
 
-${missions.length > 0 ? `Missions from Reflector:
-${JSON.stringify(missions, null, 2)}` : `Generate ${COMPOSE_CANDIDATE_COUNT} diverse resonance probes for this user.
+Each candidate must materialize its mission's move and purpose.
 Each probe must test a DIFFERENT combination of: charged nerve × comic operator × voice × distance.
-Use the user's familiar worlds as context, not genre filter.`}
+Use the user's familiar worlds as context, not genre filter.
 
 Active threads:
 ${JSON.stringify(ctx.threads.map((t: Thread) => ({
@@ -810,20 +1089,25 @@ ${JSON.stringify(ctx.recentCards.slice(0, 5).map((c: Card) => ({
     recipe_voice: c.recipe?.voice,
   })), null, 2)}
 
-Return JSON: { "candidates": [...] }
-Each candidate: { text, move, source_thread_ids, recipe: { reality, charged_tension, transformation, voice, emotional_fuel, distance, format, novelty_axis }, hypothesis_tested, expected_learning: { if_heart, if_stop_without_heart, if_fast_skip } }
-
 ⚠️ FINAL CHECK: Every "text" value MUST be in ${langName}. NOT English. NOT Polish. NOT Russian. ONLY ${langName}.`;
 
-  const { content, usage } = await callOpenAI(model, systemPrompt, userPrompt);
+  const { content, usage } = await callOpenAI(
+    model, systemPrompt, userPrompt, COMPOSER_SCHEMA, TEMPERATURE_COMPOSE,
+  );
   const estimated = estimateCost(model, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
 
   // ─── Insert generated cards into frontier ─────────────────────────────
-  const candidates = (content as { candidates?: Array<Record<string, unknown>> }).candidates || [];
+  const candidates = ((content as { candidates?: Array<Record<string, unknown>> }).candidates || [])
+    .slice(0, COMPOSE_CANDIDATE_COUNT + 2);
   let cardsCreated = 0;
 
+  // Only thread ids we actually gave the model are valid lineage —
+  // hallucinated ids would corrupt staleness checks / break uuid[] casts.
+  const knownThreadIds = new Set((ctx.threads as Thread[]).map((t) => t.id));
+
   for (const [index, candidate] of candidates.entries()) {
-    const sourceThreadIds = (candidate.source_thread_ids as string[]) || [];
+    const sourceThreadIds = ((candidate.source_thread_ids as string[]) || [])
+      .filter((tid) => knownThreadIds.has(tid));
     // Build source_thread_versions for staleness checking
     const threadVersions: Record<string, number> = {};
     for (const tid of sourceThreadIds) {
@@ -940,7 +1224,9 @@ Provide strategic analysis. Focus on: which threads are real vs accidental, what
 All compose_missions must specify language: '${ctx.userMind?.language_state?.primary || 'uk'}' and respect boundaries.
 Return JSON with thread_operations, updated strategic_summary, updated known_anti_patterns, updated unexplored_frontiers, and compose_missions for next steps.`;
 
-  const { content, usage } = await callOpenAI(model, systemPrompt, userPrompt);
+  const { content, usage } = await callOpenAI(
+    model, systemPrompt, userPrompt, STRATEGIC_SCHEMA, TEMPERATURE_STRATEGIC,
+  );
   const estimated = estimateCost(model, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
 
   // Apply thread operations (same logic as reflect)
@@ -949,8 +1235,11 @@ Return JSON with thread_operations, updated strategic_summary, updated known_ant
 
   for (const op of threadOps) {
     if (op.thread_id && op.expected_version != null) {
-      const patch = (op.patch || {}) as Record<string, unknown>;
-      const updateObj: Record<string, unknown> = { ...patch };
+      const updateObj: Record<string, unknown> = sanitizePatch(
+        op.patch as Record<string, unknown>,
+      );
+      // Strategic rights (docs/06): retire / merge / wake are STATUS moves
+      // the strategic reflector IS allowed to make — applied by code.
       if (op.operation === 'retire') updateObj.status = 'retired';
       if (op.operation === 'merge') updateObj.status = 'retired'; // merged threads retire
       updateObj.version = (op.expected_version as number) + 1;
@@ -986,19 +1275,12 @@ Return JSON with thread_operations, updated strategic_summary, updated known_ant
     .update(strategicUpdate)
     .eq('user_id', run.user_id);
 
-  // Queue compose missions
+  // Queue compose missions (deduped / merged)
   const missions = (content as { compose_missions?: Array<Record<string, unknown>> }).compose_missions || [];
   if (missions.length > 0) {
-    await supabase.from('ai_runs').insert({
-      user_id: run.user_id,
-      session_id: run.session_id,
-      run_type: 'compose',
-      status: 'queued',
-      trigger_reason: 'strategic_reflection_missions',
-      input_snapshot: { missions },
-      prompt_version: PROMPT_VERSION,
-      schema_version: SCHEMA_VERSION,
-    });
+    await queueComposeMissions(
+      supabase, run.user_id, run.session_id, missions, 'strategic_reflection_missions',
+    );
   }
 
   // ── Queue distill_quality if canon candidates accumulated ──
@@ -1011,10 +1293,9 @@ Return JSON with thread_operations, updated strategic_summary, updated known_ant
     .eq('quality_state', 'canon_candidate');
 
   if ((canonCandidateCount || 0) >= 3) {
-    await supabase.from('ai_runs').insert({
+    await queueAiRun(supabase, {
       user_id: run.user_id,
       run_type: 'distill_quality',
-      status: 'queued',
       trigger_reason: `strategic_reflect_canon_candidates=${canonCandidateCount}`,
       prompt_version: PROMPT_VERSION,
       schema_version: SCHEMA_VERSION,
@@ -1087,7 +1368,9 @@ ${JSON.stringify(candidates.map((c: Card) => ({
 
 For each card, return: card_id, scope (reusable_exact | reusable_recipe | personal), cleaned_recipe, diagnostic_purpose (or null).`;
 
-  const { content, usage } = await callOpenAI(model, systemPrompt, userPrompt);
+  const { content, usage } = await callOpenAI(
+    model, systemPrompt, userPrompt, DISTILL_SCHEMA, TEMPERATURE_DISTILL,
+  );
   const estimated = estimateCost(model, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
 
   // Insert quality recipes

@@ -16,7 +16,7 @@ import React, { useEffect, useRef, useCallback, useState } from 'react';
 import {
   View, Text, FlatList, Pressable, StyleSheet,
   Dimensions, ActivityIndicator, NativeSyntheticEvent,
-  NativeScrollEvent, Animated,
+  NativeScrollEvent, Share,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,6 +24,14 @@ import { useSessionStore, FeedCard } from '@/src/store/sessionStore';
 import { COLORS, SPACING, FONT, RADIUS, TAB_BAR_HEIGHT } from '@/src/constants/theme';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+// Dwell normalization (docs/03 §Signal Vector): 3s on 7 words and 3s on
+// 100 words are different events. ~220 words per minute reading speed.
+function estimateReadRatio(text: string, dwellMs: number): number {
+  const words = text.trim().split(/\s+/).length;
+  const expectedMs = Math.max(1200, (words / 220) * 60_000);
+  return Math.round(Math.min(dwellMs / expectedMs, 1.5) * 100) / 100;
+}
 
 // ─── Card Component (memoized, handles its own heart state) ─────────────────
 interface CardItemProps {
@@ -90,6 +98,7 @@ export default function FeedScreen() {
   const dwellStartRef = useRef<number>(Date.now());
   const prevIndexRef = useRef<number>(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sentImpressionsRef = useRef<Set<string>>(new Set());
 
   const CARD_HEIGHT = SCREEN_HEIGHT - TAB_BAR_HEIGHT - insets.top;
 
@@ -114,7 +123,10 @@ export default function FeedScreen() {
       const dwellMs = Date.now() - dwellStartRef.current;
       const prevCard = cards[prevIndex];
       const direction = currentIndex > prevIndex ? 'skip' : 'back';
-      sendSignal(prevCard.id, direction, dwellMs);
+      sendSignal(prevCard.id, direction, dwellMs, {
+        estimatedReadRatio: estimateReadRatio(prevCard.text, dwellMs),
+        position: prevIndex,
+      });
     }
 
     dwellStartRef.current = Date.now();
@@ -137,6 +149,17 @@ export default function FeedScreen() {
     }
   }, [currentIndex, cards.length]);
 
+  // ─── Impression: the card became VISIBLE ─────────────────────────────────
+  // This is what makes shown_at honest server-side: delivered → shown happens
+  // when the user actually sees the card, not when the buffer prefetched it.
+  useEffect(() => {
+    const card = cards[currentIndex];
+    if (card && !sentImpressionsRef.current.has(card.id)) {
+      sentImpressionsRef.current.add(card.id);
+      sendSignal(card.id, 'impression', undefined, { position: currentIndex });
+    }
+  }, [currentIndex, cards]);
+
   // ─── Scroll handler ─────────────────────────────────────────────────────
   const handleScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offsetY = e.nativeEvent.contentOffset.y;
@@ -148,11 +171,22 @@ export default function FeedScreen() {
 
   const handleHeart = useCallback((card: FeedCard) => {
     const dwellMs = Date.now() - dwellStartRef.current;
-    sendSignal(card.id, 'heart', dwellMs);
+    sendSignal(card.id, 'heart', dwellMs, {
+      estimatedReadRatio: estimateReadRatio(card.text, dwellMs),
+    });
   }, [sendSignal]);
 
-  const handleShare = useCallback((card: FeedCard) => {
-    sendSignal(card.id, 'share');
+  // Share must actually SHARE — the signal means "this text performs a
+  // social function" (docs/03) and is only recorded on a completed share.
+  const handleShare = useCallback(async (card: FeedCard) => {
+    try {
+      const result = await Share.share({ message: card.text });
+      if (result.action === Share.sharedAction) {
+        sendSignal(card.id, 'share');
+      }
+    } catch {
+      // user dismissed or share unavailable — no signal
+    }
   }, [sendSignal]);
 
   // ─── Render item (only real cards) ──────────────────────────────────────

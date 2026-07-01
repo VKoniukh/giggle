@@ -26,6 +26,16 @@ export const NOVELTY_DEBT_DELTA_HEART = 0.05;
 export const HEAT_DELTA_SKIP = -0.03; // small local penalty
 export const HEAT_DELTA_SHARE = 0.05; // share is separate axis, mild heat
 
+// Novelty debt is REPAID when the orchestrator actually shows something novel.
+// docs/04: "✓ погашати novelty debt" — the debt must decrease, not only grow.
+export const NOVELTY_REPAYMENT: Record<string, number> = {
+  wildcard: 0.20,
+  transfer: 0.10,
+  bridge: 0.10,
+  probe: 0.08,
+  contrast: 0.06,
+};
+
 // ─── Hard Constraints (docs/04 §Hard Constraints, docs/06 §next-card) ──────
 // These are enforced by code, NOT by AI.
 
@@ -57,7 +67,17 @@ export const STRATEGIC_TRIGGER_CANON = 5;              // 5 new canon cards
 // "В prompt передається не вся історія"
 export const REFLECTION_CARD_WINDOW = 12;   // last 8-15 shown cards (using 12 — saves tokens)
 export const CANON_EXEMPLAR_COUNT = 4;       // 3-6 canonical texts (using 4 — saves tokens)
-export const COMPOSE_CANDIDATE_COUNT = 4;    // 4 candidates per composition (was 5 — quality over quantity)
+// docs/06 §Cost Control: "1 composition call генерує 5–8 кандидатів".
+// The static prompt prefix dominates input cost, so more candidates per call
+// = lower cost per card (~20% cheaper than 4 per call).
+export const COMPOSE_CANDIDATE_COUNT = 6;
+
+// ─── AI Temperatures (per mode) ─────────────────────────────────────────────
+// Reflection is ANALYSIS — low temperature. Composition is CREATION — high.
+export const TEMPERATURE_COMPOSE = 0.85;
+export const TEMPERATURE_REFLECT = 0.3;
+export const TEMPERATURE_STRATEGIC = 0.4;
+export const TEMPERATURE_DISTILL = 0.3;
 
 // ─── Event Types ────────────────────────────────────────────────────────────
 export const EVENT_TYPES = ['impression', 'stop', 'skip', 'heart', 'share', 'back'] as const;
@@ -68,7 +88,10 @@ export const CARD_MOVES = ['probe', 'deepen', 'mutate', 'transfer', 'bridge', 'c
 export type CardMove = typeof CARD_MOVES[number];
 
 // ─── Card Statuses ──────────────────────────────────────────────────────────
-export const CARD_STATUSES = ['candidate', 'queued', 'shown', 'discarded', 'hearted'] as const;
+// 'delivered' = sent to the client buffer; 'shown' = client reported impression.
+// This keeps shown_at honest: analytics and the Reflector see what the user
+// actually SAW, in the order they saw it — not the prefetch order.
+export const CARD_STATUSES = ['candidate', 'queued', 'delivered', 'shown', 'discarded', 'hearted'] as const;
 export type CardStatus = typeof CARD_STATUSES[number];
 
 // ─── Thread Statuses ────────────────────────────────────────────────────────

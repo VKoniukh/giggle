@@ -50,6 +50,7 @@ export interface RhythmState {
   risk_budget: number;
   intensity: number;
   formats_recently_used: string[];
+  voices_recently_used?: string[];
   threads_to_rest: string[];
 }
 
@@ -97,7 +98,7 @@ export interface Thread {
 // ─── cards (§4) ─────────────────────────────────────────────────────────────
 
 export type CardMove = 'probe' | 'deepen' | 'mutate' | 'transfer' | 'bridge' | 'contrast' | 'callback' | 'wildcard' | 'rest_card';
-export type CardStatus = 'candidate' | 'queued' | 'shown' | 'discarded' | 'hearted';
+export type CardStatus = 'candidate' | 'queued' | 'delivered' | 'shown' | 'discarded' | 'hearted';
 export type CardScope = 'personal' | 'reusable_exact' | 'reusable_recipe' | 'global_probe';
 
 export interface CardRecipe {

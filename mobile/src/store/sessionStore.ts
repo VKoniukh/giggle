@@ -29,7 +29,12 @@ interface SessionState {
 
   // Actions
   startSession: () => Promise<void>;
-  sendSignal: (cardId: string, eventType: 'heart' | 'share' | 'skip' | 'back', dwellMs?: number) => void;
+  sendSignal: (
+    cardId: string,
+    eventType: 'heart' | 'share' | 'skip' | 'back' | 'impression',
+    dwellMs?: number,
+    extras?: { estimatedReadRatio?: number; position?: number },
+  ) => void;
   requestNextCard: () => void;
   prefetchCards: () => void;
   setCurrentIndex: (index: number) => void;
@@ -71,7 +76,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   // Fire-and-forget: returns void, never throws
-  sendSignal: (cardId, eventType, dwellMs) => {
+  sendSignal: (cardId, eventType, dwellMs, extras) => {
     const { sessionId } = get();
     if (!sessionId) return;
 
@@ -81,6 +86,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       card_id: cardId,
       event_type: eventType,
       dwell_ms: dwellMs,
+      estimated_read_ratio: extras?.estimatedReadRatio,
+      position: extras?.position,
     })
       .then((result) => {
         // If backend returned a next card, append to buffer

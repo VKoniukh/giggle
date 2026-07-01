@@ -28,8 +28,12 @@ import {
   FUNCTION_VERSION,
   PROMPT_VERSION,
   SCHEMA_VERSION,
+  MODEL_COMPOSE,
+  STRATEGIC_TRIGGER_SESSIONS,
+  STRATEGIC_TRIGGER_CANON,
   estimateCost,
 } from '../_shared/constants.ts';
+import { queueAiRun, violatesBoundaries } from '../_shared/orchestrator.ts';
 import type { RhythmState, Card, QualityRecipe } from '../_shared/types.ts';
 
 
@@ -130,7 +134,7 @@ serve(async (req: Request) => {
     // ─── Step 0: Check user_minds exists, create if not ────────────────
     const { data: userMind } = await supabase
       .from('user_minds')
-      .select('user_id, onboarding_completed, language_state, boundaries, onboarding_context')
+      .select('user_id, onboarding_completed, language_state, boundaries, onboarding_context, last_strategic_reflection_at')
       .eq('user_id', userId)
       .single();
 
@@ -158,18 +162,48 @@ serve(async (req: Request) => {
         .update({ status: 'ended', ended_at: new Date().toISOString() })
         .in('id', staleSessions.map(s => s.id));
 
-      // Queue strategic reflection for the closed sessions
-      const aiRunsToQueue = staleSessions.map(s => ({
+      // Session end → ONE tactical reflection (docs/06: "session end" is a
+      // reflection trigger). Deduped by the unique index.
+      await queueAiRun(supabase, {
         user_id: userId,
-        session_id: s.id,
-        run_type: 'strategic_reflect',
-        status: 'queued',
+        session_id: staleSessions[0].id,
+        run_type: 'reflect',
         trigger_reason: 'session_end_lazy_evaluation',
         prompt_version: PROMPT_VERSION,
         schema_version: SCHEMA_VERSION,
-      }));
-      
-      await supabase.from('ai_runs').insert(aiRunsToQueue);
+      });
+    }
+
+    // Strategic reflection is RARE and counter-based (docs/06 §Strategic
+    // Reflection Trigger: 3 completed sessions / 5 new canon cards) —
+    // NOT on every app open. It is the most expensive operation we have.
+    const lastStrategicAt = userMind?.last_strategic_reflection_at || '1970-01-01';
+    const [{ count: endedSinceStrategic }, { count: canonSinceStrategic }] = await Promise.all([
+      supabase
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('status', 'ended')
+        .gte('ended_at', lastStrategicAt),
+      supabase
+        .from('cards')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('status', 'hearted')
+        .gte('created_at', lastStrategicAt),
+    ]);
+
+    if (
+      (endedSinceStrategic || 0) >= STRATEGIC_TRIGGER_SESSIONS ||
+      (canonSinceStrategic || 0) >= STRATEGIC_TRIGGER_CANON
+    ) {
+      await queueAiRun(supabase, {
+        user_id: userId,
+        run_type: 'strategic_reflect',
+        trigger_reason: `sessions=${endedSinceStrategic},canon=${canonSinceStrategic}`,
+        prompt_version: PROMPT_VERSION,
+        schema_version: SCHEMA_VERSION,
+      });
     }
 
     const initialRhythm: RhythmState = {
@@ -197,14 +231,25 @@ serve(async (req: Request) => {
       throw new Error(`Failed to create session: ${sessionError?.message}`);
     }
 
+    // ─── Step 1.4: Recycle undelivered cards from previous sessions ─────
+    // Cards sent to a client buffer but never seen ('delivered', no
+    // impression) are still valid experiments — return them to the queue
+    // instead of paying to regenerate them.
+    await supabase
+      .from('cards')
+      .update({ status: 'queued' })
+      .eq('user_id', userId)
+      .eq('status', 'delivered');
+
     // ─── Step 1.5: Check for pre-generated cards ────────────────────────
     // language.tsx triggers cold_start_compose during onboarding step 1.
     // By the time user reaches feed (~20-30 sec later), cards may already
     // be generated and waiting. Use them → instant first card.
     // IMPORTANT: only use cards matching current language!
     const userLanguage = userMind?.language_state?.primary || 'uk';
+    const forbiddenZones: string[] = userMind?.boundaries?.forbidden || [];
 
-    const { data: preGenerated } = await supabase
+    const { data: preGeneratedRaw } = await supabase
       .from('cards')
       .select('id, text, format, move, recipe, status, queue_priority')
       .eq('user_id', userId)
@@ -213,22 +258,42 @@ serve(async (req: Request) => {
       .order('queue_priority', { ascending: false })
       .limit(12);
 
+    // SAFETY: pre-generation ran at onboarding step 1, BEFORE the user set
+    // boundaries at step 3. Never show a card that violates the final
+    // boundaries — discard it here.
+    const boundaryViolators = (preGeneratedRaw || []).filter(
+      (c) => violatesBoundaries(c, forbiddenZones),
+    );
+    if (boundaryViolators.length) {
+      await supabase
+        .from('cards')
+        .update({ status: 'discarded' })
+        .in('id', boundaryViolators.map((c) => c.id));
+    }
+    const preGenerated = (preGeneratedRaw || []).filter(
+      (c) => !violatesBoundaries(c, forbiddenZones),
+    );
+
     if (preGenerated && preGenerated.length >= 3) {
-      // Pre-generated cards exist! Assign them to this session.
+      // Deliver only the FIRST 4 to the client buffer. The rest stay queued
+      // server-side and flow through the orchestrator — so after the first
+      // heart the user sees ADAPTED cards within the same session, not a
+      // pre-printed batch (source: "не газета, а rolling frontier").
+      const toDeliver = preGenerated.slice(0, 4);
       await supabase
         .from('cards')
         .update({ session_id: session.id })
-        .eq('user_id', userId)
-        .eq('status', 'queued')
-        .eq('language', userLanguage)
-        .is('session_id', null);
+        .in('id', preGenerated.map((c) => c.id));
+      await supabase
+        .from('cards')
+        .update({ status: 'delivered' })
+        .in('id', toDeliver.map((c) => c.id));
 
-      // Still queue a background compose for more cards
-      await supabase.from('ai_runs').insert({
+      // Still queue a background compose for more cards (deduped)
+      await queueAiRun(supabase, {
         user_id: userId,
         session_id: session.id,
         run_type: 'compose',
-        status: 'queued',
         trigger_reason: 'post_pregenerated_compose',
         input_snapshot: {
           onboarding_context: userMind?.onboarding_context || {},
@@ -242,7 +307,7 @@ serve(async (req: Request) => {
       return new Response(
         JSON.stringify({
           session_id: session.id,
-          cards: preGenerated,
+          cards: toDeliver,
           frontier_size: preGenerated.length,
           generated_fresh: false,
           pre_generated: true,
@@ -394,7 +459,7 @@ Return JSON:
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: Deno.env.get('GIGGLE_MODEL_COMPOSE') || 'gpt-4o-mini',
+            model: MODEL_COMPOSE,
             messages: [
               { role: 'system', content: DIAGNOSTIC_SYSTEM_PROMPT },
               { role: 'user', content: userPrompt },
@@ -415,7 +480,7 @@ Return JSON:
         const usage = aiData.usage || {};
 
         // Record this generation as an ai_run for lineage
-        const usedModel = Deno.env.get('GIGGLE_MODEL_COMPOSE') || 'gpt-4o-mini';
+        const usedModel = MODEL_COMPOSE;
         const inputToks = usage.prompt_tokens || 0;
         const outputToks = usage.completion_tokens || 0;
         const cachedToks = usage.prompt_tokens_details?.cached_tokens || 0;
@@ -487,33 +552,35 @@ Return JSON:
       if (cardsError) {
         console.error('Failed to insert diagnostic cards:', cardsError.message);
       } else {
-        insertedCards = cards || [];
+        // Deliver only the first 4 to the client buffer; the rest stay
+        // queued and are served through the orchestrator, so the session
+        // can adapt mid-flight instead of playing a pre-printed batch.
+        insertedCards = (cards || []).slice(0, 4);
+        if (insertedCards.length) {
+          await supabase
+            .from('cards')
+            .update({ status: 'delivered' })
+            .in('id', insertedCards.map((c: Card) => c.id));
+        }
       }
     }
 
     // ─── Step 5: Queue background compose for more cards ────────────────
     // Even after diagnostic probes, we want AI to start composing
     // deeper personalized cards in the background
-    const { error: runError } = await supabase
-      .from('ai_runs')
-      .insert({
-        user_id: userId,
-        session_id: session.id,
-        run_type: 'compose',
-        status: 'queued',
-        trigger_reason: 'post_diagnostic_compose',
-        input_snapshot: {
-          onboarding_context: userMind?.onboarding_context || {},
-          boundaries: userMind?.boundaries || {},
-          language_state: userMind?.language_state || {},
-        },
-        prompt_version: PROMPT_VERSION,
-        schema_version: SCHEMA_VERSION,
-      });
-
-    if (runError) {
-      console.error('Failed to queue background compose:', runError.message);
-    }
+    await queueAiRun(supabase, {
+      user_id: userId,
+      session_id: session.id,
+      run_type: 'compose',
+      trigger_reason: 'post_diagnostic_compose',
+      input_snapshot: {
+        onboarding_context: userMind?.onboarding_context || {},
+        boundaries: userMind?.boundaries || {},
+        language_state: userMind?.language_state || {},
+      },
+      prompt_version: PROMPT_VERSION,
+      schema_version: SCHEMA_VERSION,
+    });
 
     // ─── Step 6: Return response ────────────────────────────────────────
     return new Response(
