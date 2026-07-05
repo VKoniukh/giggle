@@ -6,8 +6,11 @@
 
 // ─── Versioning ──────────────────────────────────────────────────────────────
 export const FUNCTION_VERSION = '1.0.0';
-export const PROMPT_VERSION = 'v1';
-export const SCHEMA_VERSION = 'v1';
+// v2 = scaffolded craft prompts (truth→angle→text), evidence digests,
+// discriminating tests. Bump on every prompt change — ai_runs.prompt_version
+// makes resonance_rate(v1) vs resonance_rate(v2) directly measurable.
+export const PROMPT_VERSION = 'v2';
+export const SCHEMA_VERSION = 'v2';
 
 // ─── AI Models (configurable, not hardcoded) ────────────────────────────────
 // Override via env vars GIGGLE_MODEL_COMPOSE / GIGGLE_MODEL_REFLECT
@@ -73,8 +76,11 @@ export const CANON_EXEMPLAR_COUNT = 4;       // 3-6 canonical texts (using 4 —
 export const COMPOSE_CANDIDATE_COUNT = 6;
 
 // ─── AI Temperatures (per mode) ─────────────────────────────────────────────
-// Reflection is ANALYSIS — low temperature. Composition is CREATION — high.
-export const TEMPERATURE_COMPOSE = 0.85;
+// Reflection is ANALYSIS — low temperature. Composition is CREATION — high:
+// the craft scaffold (truth→angle→compress→kill-check) holds the structure,
+// so temperature buys wild ANGLES, not broken form. Chaos in content,
+// determinism in procedure.
+export const TEMPERATURE_COMPOSE = 0.9;
 export const TEMPERATURE_REFLECT = 0.3;
 export const TEMPERATURE_STRATEGIC = 0.4;
 export const TEMPERATURE_DISTILL = 0.3;

@@ -37,6 +37,7 @@ export interface ComposeMission {
   move: string;
   thread_ids: string[];
   purpose: string;
+  tests_question: string | null;
   target_context: string | null;
   constraints: Record<string, unknown>;
 }
@@ -316,6 +317,7 @@ export function buildComposeMissions(
       purpose: anchor.open_question
         ? `Test the open question: ${anchor.open_question}`
         : `Go one level deeper into: ${anchor.core}`,
+      tests_question: anchor.open_question || `Is there a narrower truth inside: ${anchor.core}?`,
       target_context: (anchor.confirmed_contexts as unknown as string[])?.[0] || null,
       constraints: { avoid: anchor.avoid, voices: anchor.working_voices },
     });
@@ -328,6 +330,7 @@ export function buildComposeMissions(
       move: 'mutate',
       thread_ids: [mutateTarget.id],
       purpose: `Keep the nerve (${mutateTarget.core}) but change the comic operator — do NOT reuse the mechanism "${mutateTarget.mechanism}" verbatim`,
+      tests_question: 'Is it the NERVE that resonates, or the specific operator we have been using?',
       target_context: null,
       constraints: { avoid: mutateTarget.avoid },
     });
@@ -342,8 +345,27 @@ export function buildComposeMissions(
       move: 'transfer',
       thread_ids: [transferTarget.id],
       purpose: `Test whether the mechanism survives outside its home context: ${transferTarget.mechanism}`,
+      tests_question: 'Does the mechanism transfer beyond its confirmed context, or is the context itself the resonance?',
       target_context: tryContexts[0] || 'a completely different life domain',
       constraints: { avoid: transferTarget.avoid },
+    });
+  }
+
+  // slot 3.5 — bridge: the most alchemical move — cross two independently
+  // confirmed nerves ("дивний синтез"). Only when we have two genuinely
+  // distinct hot threads, so the synthesis has real material.
+  const bridgeable = usable.filter(
+    (t) => t.heat > 0.5 && t.confidence > 0.4 && t.status === 'active',
+  );
+  if (bridgeable.length >= 2 && missions.length < count) {
+    const [a, b] = bridgeable;
+    missions.push({
+      move: 'bridge',
+      thread_ids: [a.id, b.id],
+      purpose: `Cross two confirmed nerves into one text: (1) ${a.core} × (2) ${b.core}. Not a mashup of topics — find the SHARED hidden truth both nerves point to.`,
+      tests_question: 'Do these two threads share one deeper mechanism?',
+      target_context: null,
+      constraints: { avoid: [...(a.avoid as unknown as string[] || []), ...(b.avoid as unknown as string[] || [])] },
     });
   }
 
@@ -357,6 +379,7 @@ export function buildComposeMissions(
       purpose: frontiers.length
         ? `Probe an untouched territory: ${frontiers[0]}`
         : 'Controlled jump outside the current profile — something none of the active threads predicts',
+      tests_question: 'What else in this person can laugh that we have not touched?',
       target_context: null,
       constraints: {},
     });
@@ -371,6 +394,7 @@ export function buildComposeMissions(
       move: 'callback',
       thread_ids: [callbackTarget.id],
       purpose: `Return the motif with a NEW angle (never repeat the original surface): ${callbackTarget.core}`,
+      tests_question: 'Has the rested thread matured — does shared history amplify the hit?',
       target_context: null,
       constraints: { avoid: callbackTarget.avoid },
     });
@@ -395,6 +419,7 @@ export function buildComposeMissions(
       move: 'probe',
       thread_ids: [],
       purpose: `Orthogonal diagnostic probe: ${probeSeeds[seedIdx]}`,
+      tests_question: null,
       target_context: null,
       constraints: {},
     });

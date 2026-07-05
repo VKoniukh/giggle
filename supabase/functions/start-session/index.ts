@@ -34,6 +34,15 @@ import {
   estimateCost,
 } from '../_shared/constants.ts';
 import { queueAiRun, violatesBoundaries } from '../_shared/orchestrator.ts';
+import {
+  CONSTITUTION,
+  DIAGNOSTIC_CONTRACT,
+  QUALITY_CONSTITUTION,
+  STATIC_EXEMPLARS,
+  LANG_NAMES,
+  LANG_ANCHORS,
+  violatesLanguage,
+} from '../_shared/prompts.ts';
 import type { RhythmState, Card, QualityRecipe } from '../_shared/types.ts';
 
 
@@ -42,74 +51,16 @@ import type { RhythmState, Card, QualityRecipe } from '../_shared/types.ts';
 //            один механізм — різні теми"
 // docs/02: 7 deep layers, 10 mirth types, 12+ comic operators
 
-const DIAGNOSTIC_SYSTEM_PROMPT = `You generate diagnostic text probes for Giggle — a Personal Resonance Engine.
+// Diagnostic system prompt is composed from the shared prompt layers
+// (_shared/prompts.ts) — same constitution and craft as the Composer,
+// plus the first-contact diagnostic contract.
+const DIAGNOSTIC_SYSTEM_PROMPT = [
+  CONSTITUTION,
+  DIAGNOSTIC_CONTRACT,
+  QUALITY_CONSTITUTION,
+  STATIC_EXEMPLARS,
+].join('\n\n---\n\n');
 
-## ABSOLUTE RULE: LANGUAGE
-ALL probe texts MUST be written ENTIRELY in the language specified by the user.
-Metadata (recipe, diagnostic_purpose, expected_learning) stays in English.
-Violation of this rule = complete system failure.
-
-## What Are Diagnostic Probes
-These are the FIRST texts a new user sees. They are NOT random jokes. NOT "funny content."
-They are ORTHOGONAL RESONANCE PROBES — designed to maximally differentiate humor profiles.
-
-Each probe tests a DIFFERENT combination from the Laugh Topology:
-  charged_reality × comic_transformation × voice × distance × emotional_fuel
-
-## The 10 Types of Mirth You Must Cover
-1. RECOGNITION — "Це буквально я." Truth the reader never verbalized.
-2. REINTERPRETATION — last phrase forces rebuilding everything read before.
-3. NAKED TRUTH — someone says what everyone masks. No punchline needed.
-4. ABSURD CAPITULATION — reality stops making sense. You accept it.
-5. LIBERATION — permission to touch fear/sex/death/shame without full weight.
-6. SOCIAL CATASTROPHE — cringe that doesn't resolve. Deliciously unbearable.
-7. SUPERIORITY — someone exposed. Powerful but risks toxicity.
-8. TENDERNESS — human imperfection makes you feel close, not superior.
-9. LINGUISTIC — the word/grammar/register itself IS the machine.
-10. DELAYED — strange at first. Brain builds the connection seconds later.
-
-## What Makes a KILLER Probe
-SEMANTIC COMPRESSION — say MORE with FEWER words (1-4 sentences MAX):
-  BAD:  "Коли ти працюєш в офісі і розумієш, що ніхто не знає що робить, але всі роблять вигляд"
-  GOOD: "На daily сказав, що заблокований. Не став уточнювати, що як особистість."
-  WHY: 2 sentences compress years of experience. Reader's brain does the work.
-
-HIDDEN RECOGNITION — reader thinks "this is literally me":
-  BAD:  "Всі люди іноді відчувають себе самотніми"  
-  GOOD: "Написав 'лол' і поставив крапку. Це був найчесніший текст за день."
-
-FRESH CONTAINERS — NOT "a man walks into a bar":
-  Use: inner monologue, fake notification, dialogue, confession, search query, complaint, FAQ entry, performance review, abandoned draft
-
-CORRECT DISTANCE — sweet spot where pain becomes playful:
-  Too close: "Твоя мама тебе не любила" → hurts
-  Too far: "Якась людина десь щось зробила" → boring
-  Right: "Мама написала 'ми пишаємось тобою'. Крапка. Без emoji. Ти знаєш що це значить."
-
-## BAD Probe Examples (AVOID)
-✗ "Programmers have two problems: naming things and off-by-one errors" — generic, no pain
-✗ "У світі, де технології зближують нас..." — AI philosophical language. Delete.
-✗ "Робота — це коли всі роблять вигляд" — observation without transformation
-✗ Any text where removing it from the set changes nothing about the diagnosis
-
-## GOOD Probe Examples (STUDY THESE)
-"На першому daily сказав, що все під контролем. На другому — що працюю над ризиками. На третьому ми вже назвали пожежу трансформаційною ініціативою."
-→ Escalation. 3-step progression. Formal composure crumbling.
-
-"Лікар сказав що все добре. Тоном, яким кажуть що ще не все погано."
-→ Liberation mirth. 12 words. Reader fills in everything.
-
-"Батько подзвонив спитати як увімкнути VPN. Пояснив що це 'та штука від хакерів'. Увімкнув."
-→ Tenderness. No judgment. The imperfection IS the love.
-
-"Написав 'кохаю' босу замість дружині. Він відповів 'дякую за фідбек'."
-→ Social catastrophe. The cringe ESCALATES because the response is professional.
-
-"Відповідальний за корпоративну культуру повідомляє: п'ятничний дрескод скасовано у зв'язку з тим, що п'ятницю скасовано."
-→ Voice IS the joke. Bureaucratic register. Format as comedy.
-
-"Маю 847 друзів у фейсбуці. Вчора переїжджав сам."
-→ Two facts. No philosophy. Reader builds the insight.`;
 
 
 serve(async (req: Request) => {
@@ -382,57 +333,40 @@ serve(async (req: Request) => {
       const boundaries = userMind?.boundaries || {};
       const languageState = userMind?.language_state || { primary: 'uk', cultural_context: 'UA' };
 
-      // Map language codes to full names to prevent GPT confusion
-      const LANG_NAMES: Record<string, string> = {
-        uk: 'Ukrainian (українська)', en: 'English', pl: 'Polish (polski)',
-        de: 'German (deutsch)', fr: 'French (français)', es: 'Spanish (español)',
-        cs: 'Czech (čeština)', sk: 'Slovak (slovenčina)', ru: 'Russian (русский)',
-        pt: 'Portuguese', it: 'Italian', nl: 'Dutch', sv: 'Swedish',
-        ro: 'Romanian', hu: 'Hungarian', bg: 'Bulgarian', hr: 'Croatian',
-        tr: 'Turkish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese',
-      };
       const langCode = languageState.primary || 'uk';
       const langName = LANG_NAMES[langCode] || langCode;
 
-      const userPrompt = `═══════════════════════════════════════════
-🔴 WRITE ALL "text" FIELDS IN: ${langName}
-🔴 DO NOT write in English, Polish, Russian, or any other language.
-🔴 ONLY ${langName}.
-═══════════════════════════════════════════
+      const userPrompt = `🔴 TARGET LANGUAGE: ${langName} (code: ${langCode}).
+${LANG_ANCHORS[langCode] || `Write "unspoken_truth" and "text" strictly in ${langName}.`}
+User lives in: ${languageState.cultural_context || 'UA'} — cultural references only, NOT the text language.
 
 Generate 8 diagnostic resonance probes for a new user.
 
 USER CONTEXT:
-- User lives in: ${languageState.cultural_context || 'UA'} (for cultural references ONLY, NOT the text language!)
-- Text language: ${langName}
 - Familiar worlds: ${JSON.stringify(onboardingContext.familiar_worlds || ['not specified'])}
 - Life context hints: ${JSON.stringify(onboardingContext.life_context_hints || [])}
 - Allowed topics: ${JSON.stringify(boundaries.allowed || ['all'])}
 - Restricted topics (use carefully): ${JSON.stringify(boundaries.restricted || [])}
 - Forbidden topics (NEVER touch): ${JSON.stringify(boundaries.forbidden || [])}
 
-REQUIREMENTS:
-1. EVERY "text" field MUST be in ${langName}
-2. Each probe tests a DIFFERENT dimension (different nerve + different operator + different voice)
-3. Respect forbidden boundaries ABSOLUTELY
-4. Use familiar worlds as CONTEXT, not as genre filter
-5. Mix: 2 recognition probes, 2 mechanism probes, 1 tenderness, 1 absurdity, 1 social catastrophe, 1 linguistic/format experiment
-6. Each text should be 1-4 sentences max (semantic compression!)
-7. recipe, diagnostic_purpose, expected_learning can be in English
+Apply the diagnostic coverage mix and the full craft procedure (truth → angle →
+compress ≤ 40 words → kill-check) to each probe. Use familiar worlds as CONTEXT,
+not as a genre filter.
 
 Return JSON:
 {
   "probes": [
     {
+      "unspoken_truth": "the specific human truth this probe compresses — in ${langName}",
       "text": "THE ACTUAL TEXT IN ${langName}",
-      "format": "inner_monologue | dialogue | fake_notification | commentary | confession | ...",
+      "format": "inner_monologue | dialogue | fake_notification | confession | search_query | ...",
       "recipe": {
         "charged_tension": "what reality this touches",
         "transformation": "what comic operator is used",
         "voice": "who is speaking",
         "emotional_fuel": ["recognition", "relief", ...],
         "distance": "self-inclusive | observational | intimate | cosmic",
-        "novelty_axis": "what makes this different from the others"
+        "novelty_axis": "what makes this different from the other probes"
       },
       "diagnostic_purpose": "what this probe tests / differentiates",
       "expected_learning": {
@@ -444,7 +378,7 @@ Return JSON:
   ]
 }
 
-⚠️ FINAL CHECK: Every "text" value MUST be in ${langName}. NOT English. NOT Polish. NOT Russian. ONLY ${langName}.`;
+⚠️ FINAL CHECK: every "text" strictly in ${langName}, ≤ 40 words, kill-checked.`;
 
       try {
         // Synchronous AI call — user waits, but this is their FIRST session
@@ -513,8 +447,19 @@ Return JSON:
           .select('id')
           .single();
 
-        // Transform AI output into card records
-        diagnosticCards = probes.map(
+        // Transform AI output into card records.
+        // LANGUAGE LAW: drifted probes never reach the user's first session —
+        // first contact is exactly where trust is won or lost.
+        const validProbes = probes.filter((probe: Record<string, unknown>) => {
+          const t = ((probe.text as string) || '').trim();
+          if (!t || violatesLanguage(t, userLanguage)) {
+            console.warn(`start-session: discarded drifted probe (target=${userLanguage}): "${t.slice(0, 60)}"`);
+            return false;
+          }
+          return true;
+        });
+
+        diagnosticCards = validProbes.map(
           (probe: Record<string, unknown>, index: number) => ({
             user_id: userId,
             session_id: session.id,

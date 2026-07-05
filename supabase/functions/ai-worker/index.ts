@@ -30,7 +30,6 @@ import {
   COMPOSE_CANDIDATE_COUNT,
   REFLECTION_CARD_WINDOW,
   CANON_EXEMPLAR_COUNT,
-  CARD_MOVES,
   TEMPERATURE_COMPOSE,
   TEMPERATURE_REFLECT,
   TEMPERATURE_STRATEGIC,
@@ -38,392 +37,27 @@ import {
   estimateCost,
 } from '../_shared/constants.ts';
 import { buildComposeMissions, queueAiRun } from '../_shared/orchestrator.ts';
+import {
+  CONSTITUTION,
+  REFLECTOR_CONTRACT,
+  COMPOSER_CONTRACT,
+  QUALITY_CONSTITUTION,
+  STATIC_EXEMPLARS,
+  REFLECTOR_SCHEMA,
+  COMPOSER_SCHEMA,
+  STRATEGIC_SCHEMA,
+  DISTILL_SCHEMA,
+  LANG_NAMES,
+  LANG_ANCHORS,
+  violatesLanguage,
+  buildEvidenceDigest,
+  buildThreadDigest,
+  buildCanonDigest,
+} from '../_shared/prompts.ts';
 import type { AiRun, Thread, Card } from '../_shared/types.ts';
 
-// ─── Prompt Layers (docs/06 §Prompt Architecture) ───────────────────────────
-// Order is CRITICAL for caching: static prefix → dynamic suffix
-
-// Layer A: Product Constitution (cached — KEEP AT TOP for prompt caching)
-const CONSTITUTION = `You are part of Giggle — a Personal Resonance Engine.
-
-You discover how ONE specific person enters mirth through text. Not jokes. Not humor categories. Not entertainment. You are finding this person's unique RESONANCE FUNCTION.
-
-## What Mirth Actually Is
-Mirth is NOT "this is a good joke." It is a SHORT SHIFT IN PERCEPTION:
-  expected reality → something breaks it → but the threat is playful → a new order appears → tension becomes pleasure
-
-But there are MANY paths to mirth:
-- In a classic joke, incongruity RESOLVES
-- In absurdity, it stays UNRESOLVED  
-- In cringe, the threat DOESN'T fully disappear
-- In dark humor, you get permission to play with the forbidden
-- In "жиза" (recognition), there IS no punchline — truth so precise it becomes the punch
-
-## The Laugh Topology Formula
-Laugh response = charged_reality × comic_transformation × voice × distance × permission × novelty × current_state
-
-A person doesn't "like office humor." They MIGHT explode when:
-  real pain of professional powerlessness
-  + corporate formality register
-  + absurdly honest human reason underneath  
-  + absolutely dry delivery
-
-Same topic, DIFFERENT operation for a different person:
-  real pain of professional powerlessness
-  + three-step ESCALATION into total chaos
-  + each step maintaining formal composure
-  + the reader watching the inevitable
-
-SAME TOPIC. DIFFERENT PSYCHIC OPERATION. This is what you mine.
-
-## What You Are NOT
-- NOT a joke database or comedy writer
-- NOT a genre recommender ("you like sarcasm 38%")
-- NOT a psychological profiler
-- NOT maximizing similarity to previous winners
-- A strong reaction opens a QUESTION and a BRANCH, never repetition
-
-## 7 Deep Layers You Must Distinguish
-1. CHARGED NERVES — where psychic energy is stored (powerlessness before systems, social awkwardness, faking adulthood, family closeness AND trauma, migrant alienation, gap between self-image and reality, sex/shame/status, death/fragility, intellectual arrogance, everyday hypocrisy, maintaining dignity in chaos)
-2. COMIC OPERATORS — what the text DOES (reinterpret, escalate to absurdity, literalize metaphor, clash registers, name hidden truth, swap power, destroy punchline, compress experience, leave incongruity unresolved, make horror mundane, make mundane cosmically absurd)
-3. EMOTIONAL FUEL — what powers it (recognition, relief, tenderness, rebellion, contempt, schadenfreude, shame, self-deprecation, shared helplessness, desperate acceptance)
-4. DISTANCE & PERMISSION — too close = hurts, too far = boring, too safe = banal, too dangerous = disgusting. Find the EXACT distance where THIS person's taboo becomes playful
-5. VOICE — who speaks matters as much as what's said (exhausted friend, naive child, bureaucrat, dry catastrophe chronicler, over-intellectual neurotic, inner shameful thought, toxic commenter)
-6. SOCIAL GEOMETRY — who laughs WITH whom, AT whom, AGAINST whom
-7. NOVELTY METABOLISM — how fast patterns saturate, when wildcards are needed
-
-Treat every user model as a PROVISIONAL HYPOTHESIS.`;
-
-// Layer B: Mode Contracts (cached per mode)
-const REFLECTOR_CONTRACT = `MODE: REFLECTOR
-
-You analyze evidence and update hypotheses. You do NOT write user-facing texts.
-
-Rules:
-✓ Reference specific card IDs as evidence
-✓ Always name an alternative explanation for every observation
-✓ Search for counterevidence — one heart doesn't prove a stable truth
-✓ Separate what worked: the NERVE, the OPERATOR, the VOICE, the FUEL, the DISTANCE
-✓ Formulate what to test next as an open question
-✓ Consider user's language and cultural context
-✓ QUIET USERS: if there are few or no hearts, mine the IMPLICIT signals —
-  long dwell / high read-ratio / 'back' events are attention evidence.
-  Form weak candidate threads from dwell patterns; a silent user is not
-  an empty user
-
-✗ Do NOT make psychological diagnoses
-✗ Do NOT turn one hit into stable truth (one heart ≠ "user loves X")
-✗ Do NOT invent insights without card evidence
-✗ Do NOT generate user-facing texts`;
-
-const COMPOSER_CONTRACT = `MODE: COMPOSER
-
-You generate textual experiments — resonance probes that test specific hypotheses about what makes THIS person laugh.
-
-## LANGUAGE — ABSOLUTE RULE
-ALL "text" fields MUST be in the language specified. Metadata (recipe, hypothesis) stays in English.
-Violation = system failure.
-
-## What Makes a KILLER Probe
-
-SEMANTIC COMPRESSION — the fewer words, the harder the hit:
-  BAD:  "Коли ти працюєш в офісі і розумієш, що ніхто не знає що робить, але всі роблять вигляд"
-  GOOD: "На daily сказав, що заблокований. Не став уточнювати, що як особистість."
-  WHY: Second one compresses years of experience into 2 sentences. Reader's brain does the work.
-
-HIDDEN RECOGNITION — reader thinks "this is literally me, but I never said it out loud":
-  BAD:  "Всі люди іноді відчувають себе самотніми"
-  GOOD: "Написав 'лол' і поставив крапку. Це був найчесніший текст за день."
-  WHY: First is a greeting card. Second catches a specific micro-behavior that SPECIFIC people recognize.
-
-FRESH CONTAINERS — NOT "a man walks into a bar":
-  Use: inner monologue, fake notification, dialogue fragment, confession, fake status update, performance review excerpt, search query, complaint, abandoned message draft, FAQ entry
-
-PSYCHOLOGICALLY CORRECT DISTANCE — the sweet spot where pain becomes playful:
-  Too close: "Твоя мама тебе не любила" → hurts
-  Too far: "Якась людина десь щось зробила" → boring  
-  Just right: "Мама написала 'ми пишаємось тобою' крапка. Без emoji. Ти знаєш що це значить." → reader fills in the emotional gap
-
-## What Makes a BAD Probe
-✗ Generic observations anyone could post on social media
-✗ AI philosophical language ("In a world where..." / "у світі, де...")
-✗ Explanatory punchlines that kill the joke by explaining it
-✗ Obvious wordplay or puns
-✗ Swapping nouns ("Spring Boot" → "Django" is NOT innovation, same joke different word)
-✗ Surface variations of one joke (3 texts about standups = waste)
-✗ Copying syntax from previous cards
-✗ Writing in wrong language
-
-## Each Candidate MUST
-✓ Test a SEPARATE hypothesis (different nerve × different operator × different voice)
-✓ Have a clear recipe explaining its construction
-✓ Specify expected_learning: what each reaction (heart/skip/stop) would teach us`;
-
-// Layer C: Quality Constitution (cached)
-const QUALITY_CONSTITUTION = `QUALITY CONSTITUTION — 10 TYPES OF MIRTH
-
-Your texts should aim for these SPECIFIC states, not "funny" in general:
-
-1. RECOGNITION MIRTH — "Це буквально я." Reader's experience verbalized for the first time.
-   Example: "Відкрив нотатки телефону. Там список справ від минулого мене. Половину не можу розшифрувати. Одна каже просто 'НІ'."
-
-2. REINTERPRETATION MIRTH — last phrase forces rebuilding everything read before.
-   Example: "Сказав їй що готовий до серйозних стосунків. Вона спитала з ким."
-
-3. NAKED TRUTH MIRTH — someone says what everyone masks. No punchline needed.
-   Example: "Як справи? — Я втомився відповідати на це питання чесно, тому нормально."
-
-4. ABSURD CAPITULATION — reality stops making sense and you accept it.
-   Example: "Третій день пишу авторизацію. Система працює. Не знаю чому. Боюся дивитись код."
-
-5. LIBERATION MIRTH — permission to touch fear/sex/death/shame without full weight.
-   Example: "Лікар сказав що все добре. Тоном, яким кажуть що ще не все погано."
-
-6. SOCIAL CATASTROPHE — cringe. Tension doesn't disappear, becomes deliciously unbearable.
-   Example: "Написав 'кохаю' босу замість дружині. Він відповів 'дякую за фідбек'."
-
-7. SUPERIORITY MIRTH — someone exposed as fake/weak/absurd. Powerful but risks toxicity.
-
-8. TENDERNESS MIRTH — human imperfection makes you feel close, not superior.
-   Example: "Батько подзвонив спитати як увімкнути VPN. Пояснив що це 'та штука від хакерів'. Увімкнув."
-
-9. LINGUISTIC MIRTH — the word/grammar/register itself becomes the machine.
-   Example: "УВАГА: технічні роботи. Просимо вибачення за тимчасові трудності. Менеджмент хаосу."
-
-10. DELAYED MIRTH — strange at first, brain builds the connection seconds later.
-
-COMPRESSION IS EVERYTHING:
-- 1-4 sentences maximum  
-- Every word must earn its place
-- If removing a word doesn't weaken the text — remove it
-- The reader's brain completing the thought > spelling it out`;
-
-// Layer D: Static Exemplars (cached — contrastive pairs)
-const STATIC_EXEMPLARS = `CONTRASTIVE EXAMPLES — study these to understand quality:
-
-═══ RECOGNITION ═══
-BAD: "Всі програмісти ненавидять мітинги і п'ють каву."
-WHY BAD: Generic. Could be anyone. No specific pain.
-
-GOOD: "На daily сказав, що заблокований. Не став уточнювати, що як особистість."
-WHY GOOD: Specific professional ritual. Formal word "blocked" collides with private truth. 2 sentences. Reader's brain explodes with recognition.
-
-═══ ESCALATION ═══
-BAD: "Мітинги — це коли всі говорять і ніхто нічого не робить."
-WHY BAD: Observation, not transformation. No escalation. Boring.
-
-GOOD: "На першому daily сказав, що все під контролем. На другому — що працюю над ризиками. На третьому ми вже назвали пожежу трансформаційною ініціативою."
-WHY GOOD: Three-step progression. Each step maintains formal composure while reality crumbles. Comedy of escalation, not observation.
-
-═══ TOPIC TRANSFER vs NOUN SWAP ═══
-BAD: Previous hit was about standups → write another standup text with different words.
-WHY BAD: This is a NOUN SWAP. Same joke, different surface.
-
-GOOD: Hit was about "formal language exposing private disorder at work" → transfer to: "Сказав терапевту що працюю над собою. Вона спитала над чим саме. Я не мав відповіді."
-WHY GOOD: The MECHANISM (formal language vs. hidden truth) survives in a completely different WORLD (therapy vs. work).
-
-═══ DISTANCE CALIBRATION ═══
-BAD: "Твій батько тебе не любить." → Too direct. Hurts.
-BAD: "Батьки бувають різні." → Too far. Boring.
-
-GOOD: "Батько написав 'молодець'. Без знаку оклику. Ти знаєш різницю."
-WHY GOOD: Doesn't NAME the emotion. Creates a gap the reader fills with their own experience. Self-inclusive distance.
-
-═══ SEMANTIC COMPRESSION ═══
-BAD: "Коли ти приходиш до лікаря і він каже що все нормально але ти бачиш по його обличчю що він просто не хоче тебе лякати і ти виходиш з кабінету не знаючи чи радіти чи плакати"
-WHY BAD: 40 words to say what can be said in 12. The reader doesn't need a screenplay.
-
-GOOD: "Лікар сказав що все добре. Тоном, яким кажуть що ще не все погано."
-WHY GOOD: 12 words. Same charged reality. Reader's brain fills in EVERYTHING.
-
-═══ AI LANGUAGE ═══
-BAD: "У світі, де технології зближують нас, ми ніколи не були такими самотніми."
-WHY BAD: This is not humor. This is AI pretending to be deep. Delete immediately.
-
-GOOD: "Маю 847 друзів у фейсбуці. Вчора переїжджав сам."
-WHY GOOD: No philosophy. Just two facts. The reader builds the insight.
-
-═══ VOICE MATTERS ═══
-BAD: "Робота — це коли ти сидиш і думаєш навіщо все це." (no voice, just generic observation)
-
-GOOD: "Відповідальний за корпоративну культуру повідомляє: п'ятничний дрескод скасовано у зв'язку з тим, що п'ятницю скасовано."
-WHY GOOD: VOICE of a bureaucrat. Formal register. The humor is in WHO says it and HOW. The format IS the joke.`;
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Strict Structured Output Schemas (docs/06: "GPT повертає тільки Structured Output")
-//
-// The thread patch schema IS the whitelist: heat/fatigue/status/version are
-// NOT in it, so the model physically cannot touch mechanics-owned fields.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const THREAD_PATCH_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['core', 'mechanism', 'emotional_payoffs', 'working_voices', 'confirmed_contexts', 'contexts_to_try', 'avoid', 'open_question', 'depth'],
-  properties: {
-    core: { type: ['string', 'null'] },
-    mechanism: { type: ['string', 'null'] },
-    emotional_payoffs: { type: ['array', 'null'], items: { type: 'string' } },
-    working_voices: { type: ['array', 'null'], items: { type: 'string' } },
-    confirmed_contexts: { type: ['array', 'null'], items: { type: 'string' } },
-    contexts_to_try: { type: ['array', 'null'], items: { type: 'string' } },
-    avoid: { type: ['array', 'null'], items: { type: 'string' } },
-    open_question: { type: ['string', 'null'] },
-    depth: { type: ['integer', 'null'] },
-  },
-};
-
-const MISSION_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['move', 'thread_ids', 'purpose', 'target_context', 'semantic_distance'],
-  properties: {
-    move: { type: 'string', enum: [...CARD_MOVES] },
-    thread_ids: { type: 'array', items: { type: 'string' } },
-    purpose: { type: 'string' },
-    target_context: { type: ['string', 'null'] },
-    semantic_distance: { type: ['number', 'null'] },
-  },
-};
-
-const THREAD_OPERATIONS_SCHEMA = {
-  type: 'array',
-  items: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['operation', 'thread_id', 'expected_version', 'confidence_delta', 'patch', 'evidence_card_ids'],
-    properties: {
-      operation: { type: 'string', enum: ['strengthen', 'weaken', 'split', 'merge', 'retire', 'create'] },
-      thread_id: { type: ['string', 'null'] },
-      expected_version: { type: ['integer', 'null'] },
-      confidence_delta: { type: ['number', 'null'] },
-      patch: THREAD_PATCH_SCHEMA,
-      evidence_card_ids: { type: 'array', items: { type: 'string' } },
-    },
-  },
-};
-
-const REFLECTOR_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['observations', 'thread_operations', 'session_adjustment', 'compose_missions'],
-  properties: {
-    observations: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['claim', 'evidence_for', 'evidence_against', 'confidence', 'alternative_explanation'],
-        properties: {
-          claim: { type: 'string' },
-          evidence_for: { type: 'array', items: { type: 'string' } },
-          evidence_against: { type: 'array', items: { type: 'string' } },
-          confidence: { type: 'number' },
-          alternative_explanation: { type: 'string' },
-        },
-      },
-    },
-    thread_operations: THREAD_OPERATIONS_SCHEMA,
-    session_adjustment: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['novelty_target', 'threads_to_rest', 'avoid_next_moves', 'desired_temperature'],
-      properties: {
-        novelty_target: { type: ['number', 'null'] },
-        threads_to_rest: { type: 'array', items: { type: 'string' } },
-        avoid_next_moves: { type: 'array', items: { type: 'string' } },
-        desired_temperature: { type: ['number', 'null'] },
-      },
-    },
-    compose_missions: { type: 'array', items: MISSION_SCHEMA },
-  },
-};
-
-const RECIPE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['reality', 'charged_tension', 'transformation', 'voice', 'emotional_fuel', 'distance', 'format', 'novelty_axis', 'semantic_distance'],
-  properties: {
-    reality: { type: 'string' },
-    charged_tension: { type: 'string' },
-    transformation: { type: 'string' },
-    voice: { type: 'string' },
-    emotional_fuel: { type: 'array', items: { type: 'string' } },
-    distance: { type: 'string' },
-    format: { type: 'string' },
-    novelty_axis: { type: 'string' },
-    semantic_distance: { type: 'number' },
-  },
-};
-
-const COMPOSER_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['candidates'],
-  properties: {
-    candidates: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['text', 'move', 'source_thread_ids', 'recipe', 'hypothesis_tested', 'expected_learning'],
-        properties: {
-          text: { type: 'string' },
-          move: { type: 'string', enum: [...CARD_MOVES] },
-          source_thread_ids: { type: 'array', items: { type: 'string' } },
-          recipe: RECIPE_SCHEMA,
-          hypothesis_tested: { type: 'string' },
-          expected_learning: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['if_heart', 'if_stop_without_heart', 'if_fast_skip'],
-            properties: {
-              if_heart: { type: 'string' },
-              if_stop_without_heart: { type: 'string' },
-              if_fast_skip: { type: 'string' },
-            },
-          },
-        },
-      },
-    },
-  },
-};
-
-const STRATEGIC_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['thread_operations', 'strategic_summary', 'known_anti_patterns', 'unexplored_frontiers', 'compose_missions'],
-  properties: {
-    thread_operations: THREAD_OPERATIONS_SCHEMA,
-    strategic_summary: { type: 'string' },
-    known_anti_patterns: { type: 'array', items: { type: 'string' } },
-    unexplored_frontiers: { type: 'array', items: { type: 'string' } },
-    compose_missions: { type: 'array', items: MISSION_SCHEMA },
-  },
-};
-
-const DISTILL_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['recipes'],
-  properties: {
-    recipes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['card_id', 'scope', 'cleaned_recipe', 'diagnostic_purpose'],
-        properties: {
-          card_id: { type: 'string' },
-          scope: { type: 'string', enum: ['reusable_exact', 'reusable_recipe', 'personal'] },
-          cleaned_recipe: { ...RECIPE_SCHEMA, type: ['object', 'null'] },
-          diagnostic_purpose: { type: ['string', 'null'] },
-        },
-      },
-    },
-  },
-};
+// Prompt layers A–D, strict schemas and evidence-digest builders live in
+// _shared/prompts.ts — one source of truth for ai-worker AND start-session.
 
 // Code-side defense in depth: even if a schema changes, mechanics-owned
 // fields can never reach the DB from an AI patch.
@@ -786,70 +420,34 @@ async function executeReflection(
   const model = MODEL_REFLECT;
   const ctx = await buildUserContext(supabase, run.user_id, run.session_id);
 
-  // Build prompt: layers A-D (static, cached) + layer E (dynamic)
+  // Layers A-C static (cached). Reflector doesn't need the composer craft
+  // exemplars — dropping layer D here saves ~800 input tokens per reflect.
   const systemPrompt = [
     CONSTITUTION,
     REFLECTOR_CONTRACT,
     QUALITY_CONSTITUTION,
-    STATIC_EXEMPLARS,
   ].join('\n\n---\n\n');
 
-  // Layer E: Dynamic User Packet
-  const userPrompt = `CURRENT STATE:
+  // Layer E: code-digested evidence — the model interprets, the code counted.
+  const rhythm = ctx.sessionState?.rhythm_state || {};
+  const userPrompt = `THREADS (full ids + versions — required for thread_operations):
+${buildThreadDigest(ctx.threads as Thread[], true)}
 
-Active threads:
-${JSON.stringify(ctx.threads.map((t: Thread) => ({
-    id: t.id,
-    core: t.core,
-    mechanism: t.mechanism,
-    confidence: t.confidence,
-    heat: t.heat,
-    fatigue: t.fatigue,
-    depth: t.depth,
-    status: t.status,
-    open_question: t.open_question,
-    positive_evidence: t.positive_evidence,
-    counter_evidence: t.counter_evidence,
-  })), null, 2)}
+EVIDENCE WINDOW (newest first; cite card ids exactly as given):
+${buildEvidenceDigest(ctx.recentCards as Card[], ctx.recentEvents as never[])}
 
-Recent cards and reactions:
-${JSON.stringify(ctx.recentCards.map((c: Card) => {
-    const events = ctx.recentEvents.filter((e: { card_id: string }) => e.card_id === c.id);
-    return {
-      id: c.id,
-      text: c.text?.substring(0, 200),
-      move: c.move,
-      recipe: c.recipe,
-      status: c.status,
-      reactions: events.map((e: { event_type: string; signal_vector: unknown }) => ({
-        type: e.event_type,
-        signal: e.signal_vector,
-      })),
-    };
-  }), null, 2)}
-
-Canon exemplars (strongest hits):
-${JSON.stringify(ctx.canonCards.map((c: Card) => ({
-    id: c.id,
-    text: c.text?.substring(0, 200),
-    recipe: c.recipe,
-  })), null, 2)}
+CANON (texts that truly landed):
+${buildCanonDigest(ctx.canonCards as Card[])}
 
 Anti-patterns: ${JSON.stringify(ctx.userMind?.known_anti_patterns || [])}
-Strategic summary: ${ctx.userMind?.strategic_summary || 'None yet'}
-
-User language: ${ctx.userMind?.language_state?.primary || 'uk'}
-Cultural context: ${ctx.userMind?.language_state?.cultural_context || 'UA'}
+Strategic summary: ${ctx.userMind?.strategic_summary || 'none yet'}
 Familiar worlds: ${JSON.stringify(ctx.userMind?.onboarding_context?.familiar_worlds || [])}
 Boundaries: ${JSON.stringify(ctx.userMind?.boundaries || {})}
+Session rhythm: novelty_debt=${rhythm.novelty_debt ?? 0}, recent_moves=${JSON.stringify(rhythm.recent_moves || [])}, strong_signals=${ctx.sessionState?.strong_signals ?? 0}
+Trigger: ${run.trigger_reason}
 
-Session: ${JSON.stringify(ctx.sessionState || {})}
-
-Trigger reason: ${run.trigger_reason}
-
-Analyze what we've learned from recent reactions.
-When creating compose_missions, ensure they specify the user's language (${ctx.userMind?.language_state?.primary || 'uk'}) and respect cultural context.
-Return structured JSON.`;
+Run the protocol: strongest signal → competing explanations → discriminating tests → missions.
+Missions must respect the user's boundaries and target language '${ctx.userMind?.language_state?.primary || 'uk'}'.`;
 
   const { content, usage } = await callOpenAI(
     model, systemPrompt, userPrompt, REFLECTOR_SCHEMA, TEMPERATURE_REFLECT,
@@ -1023,71 +621,39 @@ Allowed nerves: everyday absurdity, tender human imperfection, social awkwardnes
   const language = ctx.userMind?.language_state?.primary || 'uk';
   const culturalContext = ctx.userMind?.language_state?.cultural_context || 'UA';
   const familiarWorlds = ctx.userMind?.onboarding_context?.familiar_worlds || [];
-
-  // Map language codes to full names to prevent GPT confusion
-  // (e.g., 'uk' could be misread as 'UK English')
-  const LANG_NAMES: Record<string, string> = {
-    uk: 'Ukrainian (українська)', en: 'English', pl: 'Polish (polski)',
-    de: 'German (deutsch)', fr: 'French (français)', es: 'Spanish (español)',
-    cs: 'Czech (čeština)', sk: 'Slovak (slovenčina)', ru: 'Russian (русский)',
-    pt: 'Portuguese', it: 'Italian', nl: 'Dutch', sv: 'Swedish',
-    ro: 'Romanian', hu: 'Hungarian', bg: 'Bulgarian', hr: 'Croatian',
-    sr: 'Serbian', lt: 'Lithuanian', lv: 'Latvian', et: 'Estonian',
-    tr: 'Turkish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese',
-    ar: 'Arabic', he: 'Hebrew', hi: 'Hindi', vi: 'Vietnamese',
-    th: 'Thai', id: 'Indonesian', fi: 'Finnish', da: 'Danish', no: 'Norwegian',
-  };
   const langName = LANG_NAMES[language] || language;
 
-  // Layer E: Dynamic User Packet with missions
-  const userPrompt = `═══════════════════════════════════════════
-🔴 WRITE ALL "text" FIELDS IN: ${langName}
-🔴 Language code: ${language}
-🔴 DO NOT write in English, Polish, Russian, or any other language.
-🔴 ONLY ${langName}.
-═══════════════════════════════════════════
+  // Layer E: Dynamic User Packet — numbered missions bind candidates to
+  // experiments via mission_index (lineage + one-candidate-per-mission).
+  const numberedMissions = missions
+    .map((m, i) => `${i}. [${m.move}] ${m.purpose}${m.target_context ? ` | target: ${m.target_context}` : ''}${m.tests_question ? ` | tests: ${m.tests_question}` : ''}${m.thread_ids && (m.thread_ids as string[]).length ? ` | threads: ${(m.thread_ids as string[]).join(',')}` : ''}`)
+    .join('\n');
 
-User lives in: ${culturalContext} (this is cultural context for references, NOT the text language!)
-Text language is ALWAYS: ${langName}
+  const userPrompt = `🔴 TARGET LANGUAGE: ${langName} (code: ${language}).
+${LANG_ANCHORS[language] || `Write "unspoken_truth", "angle" and "text" strictly in ${langName}.`}
+User lives in: ${culturalContext} — cultural references only, NOT the text language.
 
 Familiar worlds: ${JSON.stringify(familiarWorlds)}
 Boundaries: ${JSON.stringify(ctx.userMind?.boundaries || {})}
-Anti-patterns: ${JSON.stringify(ctx.userMind?.known_anti_patterns || [])}
+Anti-patterns (never do these): ${JSON.stringify(ctx.userMind?.known_anti_patterns || [])}
 ${safetyBlock}
-MISSIONS (one candidate per mission — the mission defines WHAT to test, you define HOW):
-${JSON.stringify(missions, null, 2)}
+MISSIONS — exactly ONE candidate per mission, set its mission_index accordingly.
+The mission defines WHAT to test; you define only HOW to land it:
+${numberedMissions}
 
-Each candidate must materialize its mission's move and purpose.
-Each probe must test a DIFFERENT combination of: charged nerve × comic operator × voice × distance.
-Use the user's familiar worlds as context, not genre filter.
+ACTIVE THREADS (context for missions that reference them):
+${buildThreadDigest(ctx.threads as Thread[], false)}
 
-Active threads:
-${JSON.stringify(ctx.threads.map((t: Thread) => ({
-    id: t.id,
-    core: t.core,
-    mechanism: t.mechanism,
-    working_voices: t.working_voices,
-    emotional_payoffs: t.emotional_payoffs,
-    contexts_to_try: t.contexts_to_try,
-    avoid: t.avoid,
-    confidence: t.confidence,
-    heat: t.heat,
-    depth: t.depth,
-    version: t.version,
-  })), null, 2)}
+CANON — texts that truly made THIS person laugh. Study the mechanisms.
+Never copy surfaces; share no more than 2 content words with any of them:
+${buildCanonDigest(ctx.canonCards as Card[])}
 
-Canon exemplars:
-${JSON.stringify(ctx.canonCards.map((c: Card) => ({
-    text: c.text?.substring(0, 200),
-    recipe: c.recipe,
-  })), null, 2)}
-
-Recent sequence (avoid repetition):
+RECENT SEQUENCE (do not repeat these moves/voices/formats back-to-back):
 ${JSON.stringify(ctx.recentCards.slice(0, 5).map((c: Card) => ({
     move: c.move,
     format: c.format,
-    recipe_voice: c.recipe?.voice,
-  })), null, 2)}
+    voice: c.recipe?.voice,
+  })))}
 
 ⚠️ FINAL CHECK: Every "text" value MUST be in ${langName}. NOT English. NOT Polish. NOT Russian. ONLY ${langName}.`;
 
@@ -1100,12 +666,32 @@ ${JSON.stringify(ctx.recentCards.slice(0, 5).map((c: Card) => ({
   const candidates = ((content as { candidates?: Array<Record<string, unknown>> }).candidates || [])
     .slice(0, COMPOSE_CANDIDATE_COUNT + 2);
   let cardsCreated = 0;
+  let languageViolations = 0;
+  let compressionViolations = 0;
 
   // Only thread ids we actually gave the model are valid lineage —
   // hallucinated ids would corrupt staleness checks / break uuid[] casts.
   const knownThreadIds = new Set((ctx.threads as Thread[]).map((t) => t.id));
 
   for (const [index, candidate] of candidates.entries()) {
+    // COMPRESSION LAW, enforced deterministically: the prompt demands ≤40
+    // words; anything past 55 is an uncompressed draft — never show it.
+    const text = ((candidate.text as string) || '').trim();
+    const wordCount = text ? text.split(/\s+/).length : 0;
+    if (!text || wordCount > 55) {
+      compressionViolations++;
+      console.warn(`compose: discarded uncompressed candidate (${wordCount} words)`);
+      continue;
+    }
+
+    // LANGUAGE LAW: the user must NEVER see a drifted card. The model may
+    // fail; the product may not.
+    if (violatesLanguage(text, language)) {
+      languageViolations++;
+      console.warn(`compose: discarded language-drifted candidate (target=${language}): "${text.slice(0, 60)}"`);
+      continue;
+    }
+
     const sourceThreadIds = ((candidate.source_thread_ids as string[]) || [])
       .filter((tid) => knownThreadIds.has(tid));
     // Build source_thread_versions for staleness checking
@@ -1118,7 +704,7 @@ ${JSON.stringify(ctx.recentCards.slice(0, 5).map((c: Card) => ({
     const { error } = await supabase.from('cards').insert({
       user_id: run.user_id,
       session_id: run.session_id,
-      text: candidate.text as string,
+      text,
       language,
       format: (candidate.recipe as Record<string, unknown>)?.format || null,
       move: (candidate.move as string) || 'probe',
@@ -1138,7 +724,16 @@ ${JSON.stringify(ctx.recentCards.slice(0, 5).map((c: Card) => ({
 
   return {
     status: 'completed',
-    output: content as Record<string, unknown>,
+    // Validation counters ride inside output → queryable per model /
+    // prompt_version straight from ai_runs (objective quality telemetry).
+    output: {
+      ...(content as Record<string, unknown>),
+      validation: {
+        language_violations: languageViolations,
+        compression_violations: compressionViolations,
+        accepted: cardsCreated,
+      },
+    },
     model,
     usage: { ...usage, estimated_cost: estimated },
     cards_created: cardsCreated,
@@ -1204,10 +799,10 @@ ${JSON.stringify((allThreads || []).map((t: Thread) => ({
     positive_evidence: t.positive_evidence?.length || 0,
     counter_evidence: t.counter_evidence?.length || 0,
     created_at: t.created_at,
-  })), null, 2)}
+  })))}
 
 Session history:
-${JSON.stringify(sessions || [], null, 2)}
+${JSON.stringify(sessions || [])}
 
 Current strategic summary: ${ctx.userMind?.strategic_summary || 'None yet'}
 Known anti-patterns: ${JSON.stringify(ctx.userMind?.known_anti_patterns || [])}
@@ -1221,8 +816,8 @@ Boundaries: ${JSON.stringify(ctx.userMind?.boundaries || {})}
 Canon size: ${ctx.canonCards.length}
 
 Provide strategic analysis. Focus on: which threads are real vs accidental, what deeper mechanisms connect them, what's been overexploited, what's untouched.
-All compose_missions must specify language: '${ctx.userMind?.language_state?.primary || 'uk'}' and respect boundaries.
-Return JSON with thread_operations, updated strategic_summary, updated known_anti_patterns, updated unexplored_frontiers, and compose_missions for next steps.`;
+Strategy COMPRESSES: strategic_summary ≤ 80 words, written as claims the Composer can act on, not prose. Keep anti-patterns and frontiers to ≤ 8 items each — drop stale ones.
+All compose_missions must respect boundaries and target language '${ctx.userMind?.language_state?.primary || 'uk'}'.`;
 
   const { content, usage } = await callOpenAI(
     model, systemPrompt, userPrompt, STRATEGIC_SCHEMA, TEMPERATURE_STRATEGIC,
